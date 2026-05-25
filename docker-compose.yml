@@ -1,0 +1,82 @@
+# docker-compose.yml
+version: '3.9'
+services:
+ # ── BASE DE DATOS COMPARTIDA ─────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: tfm-postgres
+    environment:
+      POSTGRES_USER: tfm
+      POSTGRES_PASSWORD: tfmpass
+      POSTGRES_DB: tfm
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'tfm']
+      interval: 5s
+      retries: 10
+ # ── KEYCLOAK (IdP / Authorization Server) ────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.2
+    container_name: tfm-keycloak
+    command: start-dev
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: tfm
+      KC_DB_PASSWORD: tfmpass
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME_STRICT: false
+      KC_FEATURES: token-exchange,admin-fine-grained-authz
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080" 
+# ── OPA (Policy Decision Point) ──────────────────────────────────
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: tfm-opa
+    command: run --server --addr 0.0.0.0:8181 /policies
+    volumes:
+      - ./policies:/policies
+    ports:
+      - "8181:8181"
+
+  # ── MCP SERVER + STEP-UP HANDLER ─────────────────────────────────
+  mcp-server:
+    build: ./mcp_server
+    container_name: tfm-mcp
+    environment:
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/tfm
+      MCP_SERVER_URL: http://mcp-server:8001
+      OPA_URL: http://opa:8181
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      DATABASE_URL: postgresql://tfm:tfmpass@postgres:5432/tfm
+    depends_on:
+      - keycloak
+      - opa
+      - postgres
+    ports:
+      - "8001:8001"
+
+  # ── FASTAPI BACKEND (banco sintético) ───────────────────────────
+  bank-api:
+    build: ./bank_api
+    container_name: tfm-bank
+    environment:
+      DATABASE_URL: postgresql://tfm:tfmpass@postgres:5432/tfm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8002:8002"
+
+volumes:
+  pgdata:
